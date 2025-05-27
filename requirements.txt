@@ -1,0 +1,31 @@
+# Core
+python-dotenv
+pydantic
+
+# Logging
+loguru
+
+# Web
+httpx
+beautifulsoup4
+# parsel # Optional alternative to BS4, can add later if needed
+playwright
+
+# Database (MVP will use SQLite, but good to have base SQLAlchemy)
+sqlalchemy
+aiosqlite # For async SQLite
+
+# CLI
+typer[all]
+
+# Testing
+pytest
+pytest-mock
+pytest-cov
+pytest-html # For HTML test reports
+pytest-asyncio # For async tests
+pydantic-settings
+
+tldextract
+
+respx
