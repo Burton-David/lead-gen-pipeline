@@ -29,3 +29,5 @@ pydantic-settings
 tldextract
 
 respx
+
+phonenumbers

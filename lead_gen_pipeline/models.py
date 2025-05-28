@@ -1,9 +1,13 @@
 # lead_gen_pipeline/models.py
-# Version: Gemini-2025-05-26 14:35 EDT
-from sqlalchemy import Column, Integer, String, Text, DateTime, JSON
-from sqlalchemy.orm import declarative_base # UPDATED IMPORT
+# Version: Gemini-2025-05-26 22:05 EDT
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, Index
+from sqlalchemy.orm import declarative_base 
 from sqlalchemy.sql import func
-from typing import List, Dict, Optional
+from sqlalchemy.dialects.sqlite import DATETIME as SQLITE_DATETIME # For SQLite specific datetime
+import datetime
+
+# For other databases, you might use:
+# from sqlalchemy.types import DateTime
 
 Base = declarative_base()
 
@@ -11,37 +15,49 @@ class Lead(Base): # type: ignore
     __tablename__ = "leads"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    
     company_name = Column(String, nullable=True, index=True)
-    website = Column(String, nullable=True, index=True) # Derived primary website
-    scraped_from_url = Column(String, nullable=False, index=True) # The exact URL page was scraped from
+    website = Column(String, nullable=True, index=True) # Primary website of the company
+    
+    scraped_from_url = Column(String, nullable=False, index=True) # The exact URL the data was scraped from
     canonical_url = Column(String, nullable=True) # Canonical URL of the scraped page, if available
+    
     description = Column(Text, nullable=True)
 
-    # Storing lists and dicts as JSON
+    # Storing lists and dicts as JSON.
+    # For databases that don't natively support JSON well (older SQLite),
+    # SQLAlchemy often maps this to TEXT. Modern SQLite supports JSON.
     phone_numbers = Column(JSON, nullable=True) # Stores List[str]
     emails = Column(JSON, nullable=True) # Stores List[str]
     addresses = Column(JSON, nullable=True) # Stores List[str]
-    social_media_links = Column(JSON, nullable=True) # Stores Dict[str, str]
-
+    social_media_links = Column(JSON, nullable=True) # Stores Dict[str, str] like {"linkedin": "url", "twitter": "url"}
+    
+    # Industry/Category related fields (can be expanded later)
+    industry_tags = Column(JSON, nullable=True) # List[str] of industry tags/keywords
+    
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    # For SQLite, ensure datetime objects are stored in a way that allows proper querying.
+    # Using server_default=func.now() is generally good for SQL databases.
+    # For SQLite, func.now() often translates to julianday('now') or similar.
+    # Using Python's datetime.datetime.utcnow for default can be more portable if managed by Python.
+    created_at = Column(SQLITE_DATETIME(timezone=True), server_default=func.now(), default=datetime.datetime.now(datetime.timezone.utc))
+    updated_at = Column(SQLITE_DATETIME(timezone=True), server_default=func.now(), onupdate=func.now(), default=datetime.datetime.now(datetime.timezone.utc))
 
     def __repr__(self) -> str:
         return f"<Lead(id={self.id}, company_name='{self.company_name}', website='{self.website}')>"
 
-    @property
-    def phone_numbers_list(self) -> Optional[List[str]]:
-        return self.phone_numbers if isinstance(self.phone_numbers, list) else None # type: ignore
+    # Optional: Add properties for easier access to JSON fields if needed,
+    # though direct access is often fine. E.g.:
+    # @property
+    # def phone_numbers_list(self) -> Optional[List[str]]:
+    #     return self.phone_numbers if isinstance(self.phone_numbers, list) else None
 
-    @property
-    def emails_list(self) -> Optional[List[str]]:
-        return self.emails if isinstance(self.emails, list) else None # type: ignore
+# Example of a composite index if we often query by company name and website together
+Index('ix_company_website', Lead.company_name, Lead.website)
 
-    @property
-    def addresses_list(self) -> Optional[List[str]]:
-        return self.addresses if isinstance(self.addresses, list) else None # type: ignore
-
-    @property
-    def social_media_dict(self) -> Optional[Dict[str, str]]:
-        return self.social_media_links if isinstance(self.social_media_links, dict) else None # type: ignore
+# You could add other models here later, e.g., Company, Contact, Source, etc.
+# class Company(Base):
+#     __tablename__ = "companies"
+#     id = Column(Integer, primary_key=True, index=True)
+#     name = Column(String, unique=True, index=True)
+#     # ... other company-specific fields
