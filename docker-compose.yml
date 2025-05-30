@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  lead-gen-pipeline:
+    build: .
+    container_name: lead-gen-pipeline
+    restart: unless-stopped
+    
+    # Environment variables
+    environment:
+      - PYTHONPATH=/app
+      - DATABASE_URL=sqlite+aiosqlite:///app/data/leads_production.db
+      - LOGGING_LOG_LEVEL=INFO
+      - CRAWLER_RESPECT_ROBOTS_TXT=true
+      - CRAWLER_USE_PLAYWRIGHT_BY_DEFAULT=true
+      - CRAWLER_DEFAULT_TIMEOUT_SECONDS=30
+      - MAX_PIPELINE_CONCURRENCY=3
+    
+    # Volume mounts for persistence
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
+      - ./reports:/app/reports
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4.0'
+        reservations:
+          memory: 4G
+          cpus: '2.0'
+    
+    # Network configuration
+    networks:
+      - lead-gen-network
+    
+    # Command override for different modes
+    # Uncomment one of the following:
+    
+    # For chamber directory processing:
+    command: ["python", "cli_mvp.py", "chambers", "--input", "/app/data/chamber_urls.csv"]
+    
+    # For standard website scraping:
+    # command: ["python", "cli_mvp.py", "run", "--input", "/app/data/urls_seed.csv"]
+    
+    # For interactive mode:
+    # command: ["tail", "-f", "/dev/null"]
+
+  # Optional: PostgreSQL for production scale
+  # Uncomment if you want to use PostgreSQL instead of SQLite
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: lead-gen-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_DB: leadgen
+  #     POSTGRES_USER: leadgen
+  #     POSTGRES_PASSWORD: your_secure_password_here
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   networks:
+  #     - lead-gen-network
+  #   ports:
+  #     - "5432:5432"
+
+networks:
+  lead-gen-network:
+    driver: bridge
+
+volumes:
+  postgres_data:

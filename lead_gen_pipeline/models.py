@@ -1,5 +1,5 @@
 # lead_gen_pipeline/models.py
-# Version: Gemini-2025-05-26 22:05 EDT
+# Version: Production with Chamber Directory Support
 from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, Index
 from sqlalchemy.orm import declarative_base 
 from sqlalchemy.sql import func
@@ -35,6 +35,10 @@ class Lead(Base): # type: ignore
     # Industry/Category related fields (can be expanded later)
     industry_tags = Column(JSON, nullable=True) # List[str] of industry tags/keywords
     
+    # Chamber directory specific fields (NEW)
+    chamber_name = Column(String, nullable=True, index=True) # Name of the source chamber
+    chamber_url = Column(String, nullable=True, index=True) # URL of the source chamber
+    
     # Timestamps
     # For SQLite, ensure datetime objects are stored in a way that allows proper querying.
     # Using server_default=func.now() is generally good for SQL databases.
@@ -54,6 +58,9 @@ class Lead(Base): # type: ignore
 
 # Example of a composite index if we often query by company name and website together
 Index('ix_company_website', Lead.company_name, Lead.website)
+
+# Index for chamber-based queries
+Index('ix_chamber_source', Lead.chamber_name, Lead.chamber_url)
 
 # You could add other models here later, e.g., Company, Contact, Source, etc.
 # class Company(Base):

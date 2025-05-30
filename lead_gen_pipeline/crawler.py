@@ -51,6 +51,8 @@ class AsyncWebCrawler:
         self._robots_parsers_cache: OrderedDict[str, Optional[urllib.robotparser.RobotFileParser]] = OrderedDict()
         # Locks to prevent concurrent fetching of the same robots.txt file
         self._robots_fetch_locks: Dict[str, asyncio.Lock] = {}
+        # Registry lock for thread-safe access to internal dictionaries
+        self._registry_lock: asyncio.Lock = asyncio.Lock()
         self.logger.info(f"AsyncWebCrawler initialized. Robots.txt respect: {self.settings.RESPECT_ROBOTS_TXT}")
 
     def _get_random_user_agent(self) -> str:
@@ -474,8 +476,4 @@ class AsyncWebCrawler:
         self.logger.info("Robots.txt cache and fetch locks cleared.")
         self.logger.info("AsyncWebCrawler resources closed.")
 
-    # Required for _get_robots_parser to access _registry_lock if it's not already an instance var
-    # It seems _registry_lock was added in utils.py for DomainRateLimiter but not here.
-    # Let's add it for crawler's internal lock management consistency.
-    def __post_init__(self): # Pydantic v2 style post-init
-         self._registry_lock: asyncio.Lock = asyncio.Lock()
+

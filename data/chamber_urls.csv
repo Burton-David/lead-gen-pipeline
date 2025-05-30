@@ -1,0 +1,11 @@
+url,chamber_name,state,city,expected_businesses
+https://www.paloaltochamber.com,Palo Alto Chamber of Commerce,CA,Palo Alto,500
+https://www.fremontbusiness.com,Fremont Chamber of Commerce,CA,Fremont,800
+https://www.visitslo.com,San Luis Obispo Chamber,CA,San Luis Obispo,1200
+https://www.sanjosechamber.com,San Jose Chamber of Commerce,CA,San Jose,2000
+https://www.oaklandchamber.com,Oakland Chamber of Commerce,CA,Oakland,1500
+https://www.santaclarachamber.org,Santa Clara Chamber,CA,Santa Clara,600
+https://www.redwoodcitychamber.com,Redwood City Chamber,CA,Redwood City,400
+https://www.mountainviewchamber.org,Mountain View Chamber,CA,Mountain View,700
+https://www.cupertino-chamber.org,Cupertino Chamber,CA,Cupertino,300
+https://www.menloparkcc.com,Menlo Park Chamber,CA,Menlo Park,250
