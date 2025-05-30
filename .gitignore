@@ -132,3 +132,4 @@ test_results.csv
 
 # Development tools
 .qodo/
+.cleanup_backup/

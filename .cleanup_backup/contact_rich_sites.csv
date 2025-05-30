@@ -1,4 +1,0 @@
-url,expected_contact_type
-https://httpbin.org/html,Test page (minimal contact)
-https://www.python.org/about/,Python About page
-https://docs.python.org/,Python Docs
