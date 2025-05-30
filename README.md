@@ -15,8 +15,8 @@ After manually collecting business contacts from chamber websites for consulting
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/chamber-scraper
-cd chamber-scraper
+git clone https://github.com/Burton-David/lead-gen-pipeline
+cd lead-gen-pipeline
 ./setup.sh
 
 # Extract from single chamber
@@ -158,8 +158,8 @@ Pull requests welcome. The prompt engineering can always be refined - LLMs occas
 
 **Development setup:**
 ```bash
-git clone https://github.com/yourusername/chamber-scraper
-cd chamber-scraper
+git clone https://github.com/Burton-David/lead-gen-pipeline
+cd lead-gen-pipeline
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
