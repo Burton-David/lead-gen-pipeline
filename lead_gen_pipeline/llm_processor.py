@@ -1,236 +1,262 @@
-# lead_gen_pipeline/llm_processor.py
-# LLM-powered chamber directory processing
+"""LLM-powered chamber-directory processing.
 
-import os
+The :class:`LLMProcessor` turns chamber pages into structured data: it preprocesses HTML
+to compact Markdown, prompts a language model for directory links and business listings,
+and parses the response with a JSON-repair fallback for malformed output.
+
+The model is reached through a pluggable :class:`LLMBackend`. The default
+:class:`LlamaCppBackend` runs Qwen2-7B locally via llama.cpp; tests inject a fake
+backend so the whole pipeline can be exercised without the 4 GB model.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
 import json
 import re
-import asyncio
-from typing import Dict, List, Optional, Any, Tuple
-from pathlib import Path
-from urllib.parse import urljoin, urlparse
-import tempfile
-import hashlib
+from collections import OrderedDict
+from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urljoin
 
-# CRITICAL: Import json-repair for handling malformed LLM JSON
 try:
     from json_repair import repair_json
-    JSON_REPAIR_AVAILABLE = True
-except ImportError:
-    JSON_REPAIR_AVAILABLE = False
-    repair_json = None
 
-try:
-    from llama_cpp import Llama
-    from llama_cpp.llama_grammar import LlamaGrammar
-    LLAMA_CPP_AVAILABLE = True
-except ImportError:
-    Llama = None
-    LlamaGrammar = None
-    LLAMA_CPP_AVAILABLE = False
+    JSON_REPAIR_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    JSON_REPAIR_AVAILABLE = False
+    repair_json = None  # type: ignore[assignment]
 
 try:
     import markdownify
+
     MARKDOWNIFY_AVAILABLE = True
-except ImportError:
-    markdownify = None
+except ImportError:  # pragma: no cover
+    markdownify = None  # type: ignore[assignment]
     MARKDOWNIFY_AVAILABLE = False
 
 try:
+    from .config import LLMSettings
+    from .config import settings as app_settings
     from .utils import logger
-    from .config import settings
-except ImportError:
-    from lead_gen_pipeline.utils import logger
-    from lead_gen_pipeline.config import settings
+except ImportError:  # pragma: no cover
+    from lead_gen_pipeline.config import LLMSettings  # type: ignore
+    from lead_gen_pipeline.config import settings as app_settings  # type: ignore
+    from lead_gen_pipeline.utils import logger  # type: ignore
+
+
+# Shared output schema. Kept as a superset of what both prompts request so a single
+# grammar can constrain either call; unused fields are simply omitted by the model.
+_OUTPUT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "navigation_links": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "integer"},
+        "business_listings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "website": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "email": {"type": "string"},
+                    "address": {"type": "string"},
+                    "industry": {"type": "string"},
+                },
+            },
+        },
+        "pagination": {
+            "type": "object",
+            "properties": {
+                "next_page_url": {"type": "string"},
+                "has_more": {"type": "boolean"},
+            },
+        },
+        "total_found": {"type": "integer"},
+    },
+}
+
+
+@runtime_checkable
+class LLMBackend(Protocol):
+    """A text-in, text-out language-model backend.
+
+    Implementations are synchronous and may block (the local llama.cpp backend does);
+    :class:`LLMProcessor` calls them off the event loop via :func:`asyncio.to_thread`.
+    """
+
+    def ensure_ready(self) -> bool:
+        """Load any heavy resources. Return True when the backend can generate."""
+
+    def generate(self, prompt: str, *, max_tokens: int, temperature: float) -> str:
+        """Return the model's completion for ``prompt`` (expected to be JSON)."""
+
+
+class LlamaCppBackend:
+    """Default backend: Qwen2-7B-Instruct (GGUF) via llama.cpp.
+
+    The model is loaded lazily on first use. JSON output is constrained with a grammar
+    derived from :data:`_OUTPUT_JSON_SCHEMA`.
+    """
+
+    def __init__(self, settings: LLMSettings | None = None) -> None:
+        self.settings = settings or app_settings.llm
+        self._llm: Any = None
+        self._grammar: Any = None
+        self._ready = False
+
+    def ensure_ready(self) -> bool:
+        if self._ready:
+            return True
+        try:
+            from llama_cpp import Llama
+            from llama_cpp.llama_grammar import LlamaGrammar
+        except ImportError:
+            logger.error(
+                "llama-cpp-python not available. Install with "
+                "`pip install 'lead-gen-pipeline[llm]'`."
+            )
+            return False
+
+        model_path = self.settings.MODEL_PATH
+        if not model_path.exists():
+            logger.error(
+                f"Model not found: {model_path}. Run `lead-gen setup-llm` first."
+            )
+            return False
+
+        logger.info(f"Loading Qwen2 model from {model_path} ...")
+        self._llm = Llama(
+            model_path=str(model_path),
+            n_ctx=self.settings.CONTEXT_SIZE,
+            n_threads=None,
+            n_gpu_layers=self.settings.N_GPU_LAYERS,
+            verbose=False,
+            use_mmap=True,
+            seed=self.settings.SEED,
+        )
+        self._grammar = LlamaGrammar.from_json_schema(json.dumps(_OUTPUT_JSON_SCHEMA))
+        self._ready = True
+        logger.success("Qwen2 model loaded.")
+        return True
+
+    def unload(self) -> None:
+        """Release the loaded model so its memory can be reclaimed."""
+        self._llm = None
+        self._grammar = None
+        self._ready = False
+
+    def generate(self, prompt: str, *, max_tokens: int, temperature: float) -> str:
+        if not self._ready:
+            raise RuntimeError("Backend not ready; call ensure_ready() first.")
+        call_kwargs: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "grammar": self._grammar,
+            "stop": ["</s>", "\n\n\n"],
+        }
+        try:
+            response = self._llm(
+                prompt, response_format={"type": "json_object"}, **call_kwargs
+            )
+        except TypeError:
+            # Older llama-cpp builds do not accept response_format.
+            response = self._llm(prompt, **call_kwargs)
+        return str(response["choices"][0]["text"]).strip()
+
 
 class LLMProcessor:
-    """Handles Qwen2-7B integration for chamber directory parsing."""
-    
-    def __init__(self, model_path: Optional[str] = None):
-        self.model_path = model_path or self._get_default_model_path()
-        self.llm: Optional[Llama] = None
+    """Drives an :class:`LLMBackend` to extract structured chamber-directory data."""
+
+    def __init__(
+        self,
+        backend: LLMBackend | None = None,
+        settings: LLMSettings | None = None,
+    ) -> None:
+        self.settings = settings or app_settings.llm
+        self.backend: LLMBackend = backend or LlamaCppBackend(self.settings)
         self.model_loaded = False
-        self._context_size = 32768
-        self._max_tokens = 4096
-        self._temperature = 0.0  # Deterministic output for JSON
-        
-        self._json_grammar = None
-        self._html_cache: Dict[str, str] = {}  # LRU cache for processed HTML
-        self._cache_max_size = 100
-        
-        logger.info(f"LLMProcessor initialized with model path: {self.model_path}")
-    
-    def _get_default_model_path(self) -> str:
-        """Check common model locations."""
-        paths = [
-            "./models/qwen2-7b-instruct-q4_k_m.gguf",
-            "/models/qwen2-7b-instruct-q4_k_m.gguf",
-            os.path.expanduser("~/.cache/huggingface/hub/qwen2-7b-instruct-q4_k_m.gguf"),
-            os.path.expanduser("~/models/qwen2-7b-instruct-q4_k_m.gguf")
-        ]
-        
-        for path in paths:
-            if os.path.exists(path):
-                return path
-        
-        logger.warning("Qwen2 model not found in common locations")
-        return "./models/qwen2-7b-instruct-q4_k_m.gguf"
-    
-    def _robust_json_parse(self, raw_output: str) -> Optional[Dict[str, Any]]:
-        """Parse LLM output with json-repair fallback for malformed JSON."""
+        self._html_cache: OrderedDict[str, str] = OrderedDict()
+
+    async def initialize(self) -> bool:
+        """Ensure the backend is ready (loading the model off the event loop)."""
+        if self.model_loaded:
+            return True
+        self.model_loaded = await asyncio.to_thread(self.backend.ensure_ready)
+        if not self.model_loaded:
+            logger.error("LLM backend failed to initialize.")
+        return self.model_loaded
+
+    def _robust_json_parse(self, raw_output: str) -> Any | None:
+        """Parse model output as JSON, repairing malformed output when possible."""
         if not raw_output or not raw_output.strip():
             return None
-        
-        # Clean markdown artifacts
+
         output = raw_output.strip()
-        if output.startswith('```json'):
-            output = output[7:]
-        if output.startswith('```'):
-            output = output[3:]
-        if output.endswith('```'):
+        for fence in ("```json", "```"):
+            if output.startswith(fence):
+                output = output[len(fence) :]
+                break
+        if output.endswith("```"):
             output = output[:-3]
         output = output.strip()
-        
-        # Try standard parsing first
+
         try:
             return json.loads(output)
         except json.JSONDecodeError as e:
             logger.warning(f"JSON parsing failed: {e}")
-            
-            # Fallback to repair
-            if JSON_REPAIR_AVAILABLE and repair_json:
-                try:
-                    logger.info("Attempting JSON repair")
-                    repaired = repair_json(output, return_objects=True)
-                    
-                    if repaired and isinstance(repaired, (dict, list)):
-                        logger.success("JSON repair successful")
-                        return repaired
-                    else:
-                        logger.error("JSON repair returned empty data")
-                        return None
-                        
-                except Exception as repair_error:
-                    logger.error(f"JSON repair failed: {repair_error}")
-                    return None
-            else:
-                logger.error("json-repair not available")
+
+        if JSON_REPAIR_AVAILABLE and repair_json is not None:
+            try:
+                repaired = repair_json(output, return_objects=True)
+            except Exception as repair_error:
+                logger.error(f"JSON repair failed: {repair_error}")
                 return None
-    
-    async def initialize(self) -> bool:
-        """Initialize the LLM model."""
-        if not LLAMA_CPP_AVAILABLE:
-            logger.error("llama-cpp-python not available. Install with: pip install llama-cpp-python")
-            return False
-        
-        if self.model_loaded:
-            return True
-            
-        try:
-            if not os.path.exists(self.model_path):
-                logger.error(f"Model file not found: {self.model_path}")
-                return False
-            
-            logger.info("Loading Qwen2 Instruct 7B model...")
-            
-            self.llm = Llama(
-                model_path=self.model_path,
-                n_ctx=self._context_size,
-                n_threads=os.cpu_count() or 4,
-                n_gpu_layers=-1,  # Use all available GPU layers
-                verbose=False,
-                use_mmap=True,
-                use_mlock=True,
-                seed=42
-            )
-            
-            # JSON schema for structured output
-            json_schema = '''
-            {
-                "type": "object",
-                "properties": {
-                    "navigation_links": {
-                        "type": "array",
-                        "items": {"type": "string"}
-                    },
-                    "business_listings": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "website": {"type": "string"},
-                                "phone": {"type": "string"},
-                                "email": {"type": "string"},
-                                "address": {"type": "string"},
-                                "industry": {"type": "string"}
-                            }
-                        }
-                    },
-                    "pagination": {
-                        "type": "object",
-                        "properties": {
-                            "next_page_url": {"type": "string"},
-                            "has_more": {"type": "boolean"}
-                        }
-                    }
-                }
-            }
-            '''
-            
-            self._json_grammar = LlamaGrammar.from_json_schema(json_schema)
-            
-            self.model_loaded = True
-            logger.success("Qwen2 model loaded successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize LLM: {e}")
-            return False
-    
+            if isinstance(repaired, (dict, list)) and repaired:
+                logger.success("JSON repair succeeded.")
+                return repaired
+            logger.error("JSON repair returned empty data.")
+            return None
+
+        logger.error("json-repair not available; cannot recover malformed output.")
+        return None
+
     def _html_to_markdown(self, html_content: str) -> str:
-        """Convert HTML to Markdown for token efficiency."""
-        if not MARKDOWNIFY_AVAILABLE:
+        """Convert HTML to Markdown to reduce token count for the model."""
+        if not MARKDOWNIFY_AVAILABLE or markdownify is None:
             from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html_content, 'html.parser')
-            return soup.get_text(separator='\n', strip=True)
-        
+
+            return BeautifulSoup(html_content, "html.parser").get_text(
+                separator="\n", strip=True
+            )
+
         markdown = markdownify.markdownify(
-            html_content,
-            heading_style="ATX",
-            bullets="-",
-            strong_tag="**",
-            emphasis_tag="*"
+            html_content, heading_style="ATX", bullets="-"
         )
-        
-        # Clean excessive whitespace
-        markdown = re.sub(r'\n\s*\n\s*\n', '\n\n', markdown)
-        return markdown.strip()
-    
-    def _preprocess_chamber_page(self, html_content: str, url: str) -> str:
-        """Preprocess chamber page HTML for LLM consumption."""
+        return re.sub(r"\n\s*\n\s*\n", "\n\n", markdown).strip()
+
+    def _preprocess_chamber_page(self, html_content: str) -> str:
+        """Convert and truncate a page to fit the model context, with an LRU cache."""
         cache_key = hashlib.md5(html_content.encode()).hexdigest()
-        
-        if cache_key in self._html_cache:
-            return self._html_cache[cache_key]
-        
+        cached = self._html_cache.get(cache_key)
+        if cached is not None:
+            self._html_cache.move_to_end(cache_key)
+            return cached
+
         markdown = self._html_to_markdown(html_content)
-        
-        # Truncate if exceeds context window
-        max_chars = self._context_size * 3
+        max_chars = self.settings.CONTEXT_SIZE * 3
         if len(markdown) > max_chars:
             markdown = markdown[:max_chars] + "\n\n[Content truncated]"
-        
-        # LRU cache management
-        if len(self._html_cache) >= self._cache_max_size:
-            oldest_key = next(iter(self._html_cache))
-            del self._html_cache[oldest_key]
-        
+
+        if len(self._html_cache) >= self.settings.HTML_CACHE_SIZE:
+            self._html_cache.popitem(last=False)
         self._html_cache[cache_key] = markdown
         return markdown
-    
-    def _create_directory_navigation_prompt(self, page_content: str, url: str) -> str:
-        # After much iteration, this prompt structure works best for chamber sites
-        return f"""Analyze this Chamber of Commerce page and find business directory links.
+
+    def _create_directory_navigation_prompt(self, page_content: str) -> str:
+        return f"""\
+Analyze this Chamber of Commerce page and find business directory links.
 
 Respond with valid JSON only - no markdown, no explanations.
 
@@ -246,9 +272,8 @@ JSON format:
 }}
 
 Empty array if no directory links found."""
-    
-    def _create_business_extraction_prompt(self, page_content: str, url: str) -> str:
-        # Simplified after testing - direct instructions work better than roleplay
+
+    def _create_business_extraction_prompt(self, page_content: str) -> str:
         return f"""Extract business data from this chamber directory page.
 
 JSON only - no extra text.
@@ -277,153 +302,111 @@ JSON format:
 
 Use null for missing fields. Extract all businesses found."""
 
-    async def find_directory_links(self, html_content: str, url: str) -> List[str]:
-        """Find navigation links to chamber business directories."""
-        if not self.model_loaded:
-            await self.initialize()
-        
-        if not self.llm:
-            logger.error("LLM not initialized")
+    async def _generate(self, prompt: str) -> str:
+        return await asyncio.to_thread(
+            self.backend.generate,
+            prompt,
+            max_tokens=self.settings.MAX_TOKENS,
+            temperature=self.settings.TEMPERATURE,
+        )
+
+    async def find_directory_links(self, html_content: str, url: str) -> list[str]:
+        """Return absolute URLs of business-directory pages found on a chamber page."""
+        if not self.model_loaded and not await self.initialize():
             return []
-        
+
         try:
-            processed_content = self._preprocess_chamber_page(html_content, url)
-            prompt = self._create_directory_navigation_prompt(processed_content, url)
-            
+            prompt = self._create_directory_navigation_prompt(
+                self._preprocess_chamber_page(html_content)
+            )
             logger.info(f"Analyzing chamber page: {url}")
-            
-            # Try Qwen2 JSON mode if supported
-            try:
-                response = self.llm(
-                    prompt,
-                    max_tokens=self._max_tokens,
-                    temperature=self._temperature,
-                    grammar=self._json_grammar,
-                    stop=["</s>", "\n\n\n"],
-                    response_format={"type": "json_object"}
-                )
-            except TypeError:
-                # Fallback without response_format
-                response = self.llm(
-                    prompt,
-                    max_tokens=self._max_tokens,
-                    temperature=self._temperature,
-                    grammar=self._json_grammar,
-                    stop=["</s>", "\n\n\n"]
-                )
-            
-            result_text = response['choices'][0]['text'].strip()
-            
-            # Use robust JSON parsing with repair fallback
-            result = self._robust_json_parse(result_text)
-            if result:
-                navigation_links = result.get('navigation_links', [])
-                
-                # Convert relative URLs to absolute
-                absolute_links = []
-                for link in navigation_links:
-                    if link.startswith('http'):
-                        absolute_links.append(link)
-                    else:
-                        absolute_url = urljoin(url, link)
-                        absolute_links.append(absolute_url)
-                
-                logger.success(f"Found {len(absolute_links)} directory links")
-                return absolute_links
-                
-            else:
-                logger.error("Failed to parse LLM response")
-                return []
-                
+            result = self._robust_json_parse(await self._generate(prompt))
         except Exception as e:
-            logger.error(f"Error finding directory links: {e}")
+            logger.error(f"Error finding directory links for {url}: {e}")
             return []
-    
-    async def extract_business_listings(self, html_content: str, url: str) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-        """Extract business listings from chamber directory pages."""
-        if not self.model_loaded:
-            await self.initialize()
-        
-        if not self.llm:
-            logger.error("LLM not initialized")
+
+        if not isinstance(result, dict):
+            logger.error("LLM response was not a JSON object for directory links.")
+            return []
+
+        links: list[str] = []
+        for link in result.get("navigation_links", []) or []:
+            if not isinstance(link, str) or not link.strip():
+                continue
+            links.append(link if link.startswith("http") else urljoin(url, link))
+        logger.success(f"Found {len(links)} directory links on {url}")
+        return links
+
+    async def extract_business_listings(
+        self, html_content: str, url: str
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Return cleaned business records and the next-page URL (if any)."""
+        if not self.model_loaded and not await self.initialize():
             return [], None
-        
+
         try:
-            processed_content = self._preprocess_chamber_page(html_content, url)
-            prompt = self._create_business_extraction_prompt(processed_content, url)
-            
+            prompt = self._create_business_extraction_prompt(
+                self._preprocess_chamber_page(html_content)
+            )
             logger.info(f"Extracting businesses from: {url}")
-            
-            # Try to use Qwen2's JSON mode if available
-            try:
-                response = self.llm(
-                    prompt,
-                    max_tokens=self._max_tokens,
-                    temperature=self._temperature,
-                    grammar=self._json_grammar,
-                    stop=["</s>", "\n\n\n"],
-                    response_format={"type": "json_object"}  # Qwen2 JSON mode
-                )
-            except TypeError:
-                # Fallback if response_format not supported
-                response = self.llm(
-                    prompt,
-                    max_tokens=self._max_tokens,
-                    temperature=self._temperature,
-                    grammar=self._json_grammar,
-                    stop=["</s>", "\n\n\n"]
-                )
-            
-            result_text = response['choices'][0]['text'].strip()
-            
-            # Use robust JSON parsing with repair fallback
-            result = self._robust_json_parse(result_text)
-            if result:
-                business_listings = result.get('business_listings', [])
-                
-                # Handle pagination
-                pagination = result.get('pagination', {})
-                next_page_url = pagination.get('next_page_url')
-                if next_page_url and not next_page_url.startswith('http'):
-                    next_page_url = urljoin(url, next_page_url)
-                
-                # Clean business data
-                cleaned_businesses = []
-                for business in business_listings:
-                    cleaned_business = {
-                        'name': business.get('name', '').strip() or None,
-                        'website': business.get('website', '').strip() or None,
-                        'phone': business.get('phone', '').strip() or None,
-                        'email': business.get('email', '').strip() or None,
-                        'address': business.get('address', '').strip() or None,
-                        'industry': business.get('industry', '').strip() or None,
-                        'source_url': url
-                    }
-                    
-                    if cleaned_business['name'] or cleaned_business['website']:
-                        cleaned_businesses.append(cleaned_business)
-                
-                logger.success(f"Extracted {len(cleaned_businesses)} businesses")
-                return cleaned_businesses, next_page_url
-                
-            else:
-                logger.error("Failed to parse LLM response")
-                return [], None
-                
+            result = self._robust_json_parse(await self._generate(prompt))
         except Exception as e:
-            logger.error(f"Error extracting business listings: {e}")
+            logger.error(f"Error extracting businesses from {url}: {e}")
             return [], None
-    
-    async def close(self):
-        """Clean up model resources."""
-        if hasattr(self, 'llm') and self.llm:
-            self.llm = None
+
+        if not isinstance(result, dict):
+            logger.error("LLM response was not a JSON object for business listings.")
+            return [], None
+
+        pagination = result.get("pagination") or {}
+        next_page_url = (
+            pagination.get("next_page_url") if isinstance(pagination, dict) else None
+        )
+        if next_page_url and not str(next_page_url).startswith("http"):
+            next_page_url = urljoin(url, str(next_page_url))
+
+        cleaned: list[dict[str, Any]] = []
+        for business in result.get("business_listings", []) or []:
+            if not isinstance(business, dict):
+                continue
+            record = {
+                field: (str(business.get(field) or "").strip() or None)
+                for field in (
+                    "name",
+                    "website",
+                    "phone",
+                    "email",
+                    "address",
+                    "industry",
+                )
+            }
+            record["source_url"] = url
+            if record["name"] or record["website"]:
+                cleaned.append(record)
+
+        logger.success(f"Extracted {len(cleaned)} businesses from {url}")
+        return cleaned, next_page_url
+
+    async def close(self) -> None:
+        """Release the backend's model and clear the preprocessing cache."""
+        if isinstance(self.backend, LlamaCppBackend):
+            self.backend.unload()
         self.model_loaded = False
         self._html_cache.clear()
-        logger.info("LLM processor cleaned up")
+        logger.info("LLM processor cleaned up.")
 
 
-# Factory function - simpler than singleton pattern
-def create_llm_processor() -> LLMProcessor:
-    """Create new LLM processor instance."""
-    return LLMProcessor()
+_llm_processor_singleton: LLMProcessor | None = None
+
+
+def get_llm_processor() -> LLMProcessor:
+    """Return the process-wide :class:`LLMProcessor`, creating it on first use."""
+    global _llm_processor_singleton
+    if _llm_processor_singleton is None:
+        _llm_processor_singleton = LLMProcessor()
+    return _llm_processor_singleton
+
+
+def create_llm_processor(backend: LLMBackend | None = None) -> LLMProcessor:
+    """Create a fresh :class:`LLMProcessor`, optionally with a custom backend."""
+    return LLMProcessor(backend=backend)
