@@ -19,6 +19,8 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from lead_gen_pipeline import __version__
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -29,19 +31,15 @@ class CrawlerSettings(BaseSettings):
         env_prefix="CRAWLER_", extra="ignore", case_sensitive=False
     )
 
-    USER_AGENTS: list[str] = Field(
-        default=[
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) "
-            "Gecko/20100101 Firefox/126.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:126.0) "
-            "Gecko/20100101 Firefox/126.0",
-        ]
+    # Sent on every request and used for robots.txt matching. urllib.robotparser
+    # matches groups on the token before the first "/", so site operators can
+    # target this crawler with "User-agent: lead-gen-pipeline".
+    USER_AGENT: str = Field(
+        default=(
+            f"lead-gen-pipeline/{__version__} "
+            "(+https://github.com/Burton-David/lead-gen-pipeline)"
+        ),
+        min_length=1,
     )
     DEFAULT_TIMEOUT_SECONDS: int = Field(default=30, ge=5, le=120)
     MIN_DELAY_PER_DOMAIN_SECONDS: float = Field(default=3.0, ge=0.5)
@@ -55,10 +53,6 @@ class CrawlerSettings(BaseSettings):
 
     RESPECT_ROBOTS_TXT: bool = Field(
         default=True, description="Whether to fetch and respect robots.txt rules."
-    )
-    ROBOTS_TXT_USER_AGENT: str = Field(
-        default="*",
-        description="User agent used when checking robots.txt ('*' = all agents).",
     )
     ROBOTS_TXT_CACHE_SIZE: int = Field(
         default=100,

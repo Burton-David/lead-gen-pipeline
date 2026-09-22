@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 from typer.testing import CliRunner
 
 from lead_gen_pipeline.cli import app
+from lead_gen_pipeline.config import settings
 from lead_gen_pipeline.database import save_lead
 
 runner = CliRunner()
@@ -19,6 +20,12 @@ runner = CliRunner()
 def test_config_command_runs():
     result = runner.invoke(app, ["config"])
     assert result.exit_code == 0
+
+
+def test_config_command_shows_user_agent(monkeypatch):
+    monkeypatch.setattr(settings.crawler, "USER_AGENT", "lead-gen-pipeline/7.7")
+    result = runner.invoke(app, ["config"])
+    assert "lead-gen-pipeline/7.7" in result.stdout
 
 
 def test_init_command_creates_db(temp_db_url):
