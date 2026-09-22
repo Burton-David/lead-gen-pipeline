@@ -13,7 +13,7 @@ from sqlalchemy import select
 from lead_gen_pipeline.config import settings
 from lead_gen_pipeline.database import get_async_session_local
 from lead_gen_pipeline.models import Lead
-from lead_gen_pipeline.run_pipeline_mvp import main_pipeline
+from lead_gen_pipeline.pipeline import main_pipeline
 
 B2B_URL = "http://b2b-co.com/contact"
 SIMPLE_URL = "http://simple-co.com/"

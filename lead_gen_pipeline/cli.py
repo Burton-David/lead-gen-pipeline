@@ -25,7 +25,7 @@ from lead_gen_pipeline.chamber_pipeline import run_chamber_pipeline
 from lead_gen_pipeline.config import settings
 from lead_gen_pipeline.database import get_async_session_local, init_db
 from lead_gen_pipeline.models import Lead
-from lead_gen_pipeline.run_pipeline_mvp import main_pipeline
+from lead_gen_pipeline.pipeline import main_pipeline
 from lead_gen_pipeline.utils import logger
 
 app = typer.Typer(
