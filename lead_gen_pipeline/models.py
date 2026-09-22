@@ -1,70 +1,85 @@
-# lead_gen_pipeline/models.py
-# Version: Production with Chamber Directory Support
-from sqlalchemy import Column, Integer, String, Text, DateTime, JSON, Index
-from sqlalchemy.orm import declarative_base 
+"""SQLAlchemy models for extracted business leads (typed 2.0 style)."""
+
+from datetime import datetime, timezone
+
+from sqlalchemy import JSON, DateTime, Index, String, Text
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
-from sqlalchemy.dialects.sqlite import DATETIME as SQLITE_DATETIME # For SQLite specific datetime
-import datetime
 
-# For other databases, you might use:
-# from sqlalchemy.types import DateTime
 
-Base = declarative_base()
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
-class Lead(Base): # type: ignore
+
+class Base(DeclarativeBase):
+    """Declarative base for all ORM models."""
+
+
+class Lead(Base):
+    """A single business record scraped from a web page or chamber directory.
+
+    List- and dict-valued fields are stored as JSON. Modern SQLite stores these as
+    ``TEXT`` with JSON functions available; SQLAlchemy serialises and deserialises them.
+    """
+
     __tablename__ = "leads"
 
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    
-    company_name = Column(String, nullable=True, index=True)
-    website = Column(String, nullable=True, index=True) # Primary website of the company
-    
-    scraped_from_url = Column(String, nullable=False, index=True) # The exact URL the data was scraped from
-    canonical_url = Column(String, nullable=True) # Canonical URL of the scraped page, if available
-    
-    description = Column(Text, nullable=True)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
-    # Storing lists and dicts as JSON.
-    # For databases that don't natively support JSON well (older SQLite),
-    # SQLAlchemy often maps this to TEXT. Modern SQLite supports JSON.
-    phone_numbers = Column(JSON, nullable=True) # Stores List[str]
-    emails = Column(JSON, nullable=True) # Stores List[str]
-    addresses = Column(JSON, nullable=True) # Stores List[str]
-    social_media_links = Column(JSON, nullable=True) # Stores Dict[str, str] like {"linkedin": "url", "twitter": "url"}
-    
-    # Industry/Category related fields (can be expanded later)
-    industry_tags = Column(JSON, nullable=True) # List[str] of industry tags/keywords
-    
-    # Chamber directory specific fields (NEW)
-    chamber_name = Column(String, nullable=True, index=True) # Name of the source chamber
-    chamber_url = Column(String, nullable=True, index=True) # URL of the source chamber
-    
-    # Timestamps
-    # For SQLite, ensure datetime objects are stored in a way that allows proper querying.
-    # Using server_default=func.now() is generally good for SQL databases.
-    # For SQLite, func.now() often translates to julianday('now') or similar.
-    # Using Python's datetime.datetime.utcnow for default can be more portable if managed by Python.
-    created_at = Column(SQLITE_DATETIME(timezone=True), server_default=func.now(), default=datetime.datetime.now(datetime.timezone.utc))
-    updated_at = Column(SQLITE_DATETIME(timezone=True), server_default=func.now(), onupdate=func.now(), default=datetime.datetime.now(datetime.timezone.utc))
+    company_name: Mapped[str | None] = mapped_column(String, index=True)
+    website: Mapped[str | None] = mapped_column(String, index=True)
+
+    # The exact URL the data was scraped from (always recorded).
+    scraped_from_url: Mapped[str] = mapped_column(String, index=True)
+    canonical_url: Mapped[str | None] = mapped_column(String)
+
+    description: Mapped[str | None] = mapped_column(Text)
+
+    phone_numbers: Mapped[list[str] | None] = mapped_column(JSON)
+    emails: Mapped[list[str] | None] = mapped_column(JSON)
+    addresses: Mapped[list[str] | None] = mapped_column(JSON)
+    social_media_links: Mapped[dict[str, str] | None] = mapped_column(JSON)
+    industry_tags: Mapped[list[str] | None] = mapped_column(JSON)
+
+    # Source chamber, when the lead came from a directory crawl.
+    chamber_name: Mapped[str | None] = mapped_column(String, index=True)
+    chamber_url: Mapped[str | None] = mapped_column(String, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+    @property
+    def phone_numbers_list(self) -> list[str] | None:
+        return self.phone_numbers if isinstance(self.phone_numbers, list) else None
+
+    @property
+    def emails_list(self) -> list[str] | None:
+        return self.emails if isinstance(self.emails, list) else None
+
+    @property
+    def addresses_list(self) -> list[str] | None:
+        return self.addresses if isinstance(self.addresses, list) else None
+
+    @property
+    def social_media_dict(self) -> dict[str, str] | None:
+        if isinstance(self.social_media_links, dict):
+            return self.social_media_links
+        return None
 
     def __repr__(self) -> str:
-        return f"<Lead(id={self.id}, company_name='{self.company_name}', website='{self.website}')>"
+        return (
+            f"<Lead(id={self.id}, company_name='{self.company_name}', "
+            f"website='{self.website}')>"
+        )
 
-    # Optional: Add properties for easier access to JSON fields if needed,
-    # though direct access is often fine. E.g.:
-    # @property
-    # def phone_numbers_list(self) -> Optional[List[str]]:
-    #     return self.phone_numbers if isinstance(self.phone_numbers, list) else None
 
-# Example of a composite index if we often query by company name and website together
-Index('ix_company_website', Lead.company_name, Lead.website)
-
-# Index for chamber-based queries
-Index('ix_chamber_source', Lead.chamber_name, Lead.chamber_url)
-
-# You could add other models here later, e.g., Company, Contact, Source, etc.
-# class Company(Base):
-#     __tablename__ = "companies"
-#     id = Column(Integer, primary_key=True, index=True)
-#     name = Column(String, unique=True, index=True)
-#     # ... other company-specific fields
+# Composite indexes for the queries the pipeline and CLI run most often.
+Index("ix_company_website", Lead.company_name, Lead.website)
+Index("ix_chamber_source", Lead.chamber_name, Lead.chamber_url)

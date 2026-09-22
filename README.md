@@ -1,176 +1,176 @@
-# Chamber Business Directory Scraper
+# lead-gen-pipeline
 
-Python tool for extracting business data from Chamber of Commerce member directories using local LLM integration.
+[![CI](https://github.com/Burton-David/lead-gen-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/Burton-David/lead-gen-pipeline/actions/workflows/ci.yml)
+[![Python 3.10–3.13](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-After manually collecting business contacts from chamber websites for consulting projects, I built this to automate the process. Uses Qwen2-7B locally to intelligently navigate different directory structures and extract structured business data.
+Structured business-data extraction from web pages and Chamber of Commerce member
+directories. Single pages are parsed deterministically; whole directories are navigated
+and extracted by a **local LLM** (Qwen2-7B via llama.cpp) — no API keys, no data leaving
+the machine.
 
-## Features
+The interesting part is the directory crawl: chamber sites bury member listings behind
+wildly different layouts (category grids, A–Z indexes, paginated tables). Instead of a
+bespoke parser per site, the pipeline asks a local model to find the directory and read
+the listings, then repairs malformed model output and deduplicates the results before
+they hit the database.
 
-- **Adaptive navigation**: Handles category-based, alphabetical, and paginated directory layouts
-- **Structured extraction**: Business names, websites, phone numbers, emails, addresses, industries
-- **Local LLM**: No API costs, complete data privacy, works offline
-- **Production ready**: Bulk database operations, deduplication, CSV export
-- **Robust parsing**: JSON repair fallbacks handle malformed LLM output
+## What it does
 
-## Quick Start
+- **Deterministic single-page extraction** — company name, phone numbers (E.164),
+  emails (incl. obfuscated and Cloudflare-protected), postal addresses, social profiles,
+  description, and canonical URL, using metadata, schema.org markup, and text heuristics.
+- **Agentic directory navigation** — a local LLM locates member directories and extracts
+  listings across varied layouts, with a **JSON-repair fallback** for malformed output.
+- **Pluggable LLM backend** — ships with a llama.cpp Qwen2-7B backend; the `LLMBackend`
+  protocol lets you swap in another model (or a fake, as the tests do).
+- **Polite crawling** — honors `robots.txt`, rate-limits per domain, retries transient
+  failures with backoff, and detects CAPTCHA challenge pages.
+- **Bulk persistence** — deduplicating, batched upserts into SQLite with helper indexes.
+- **Typed and tested** — SQLAlchemy 2.0 typed models; black + ruff + mypy clean; a
+  deterministic test suite that runs without the model.
+
+## Quickstart (no model required)
+
+The single-page extractor needs only the core install:
 
 ```bash
 git clone https://github.com/Burton-David/lead-gen-pipeline
 cd lead-gen-pipeline
-./setup.sh
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
 
-# Extract from single chamber
-python cli.py chambers --url https://www.paloaltochamber.com
-
-# Export results
-python cli.py export --output leads.csv
+lead-gen test https://www.python.org
 ```
+
+`lead-gen test <url>` fetches a page and prints the structured data it extracted — a
+30-second way to see the parser work end to end.
+
+Process a list of sites and store the results:
+
+```bash
+# data/urls_seed.csv has a `url` column
+lead-gen run --input data/urls_seed.csv
+lead-gen stats          # extraction coverage of the stored leads
+lead-gen export -o leads.csv
+```
+
+## Chamber directories (local LLM)
+
+The directory crawl needs the model and a headless browser:
+
+```bash
+pip install -e ".[llm,browser]"
+playwright install chromium
+lead-gen setup-llm                      # downloads Qwen2-7B-Instruct GGUF (~4 GB)
+
+lead-gen chambers --url https://www.examplechamber.com
+# or a CSV of chamber URLs:
+lead-gen chambers --input data/chamber_urls.csv
+```
+
+Requirements for this path: ~8 GB RAM and ~4 GB disk for the model. Apple Silicon and
+CUDA are used automatically when `llama-cpp-python` is built with the matching backend.
 
 ## Performance
 
-- **Palo Alto Chamber**: 296 businesses from 26 categories in 9 minutes
-- **Data completeness**: 100% names/phones, 90% emails, 85% websites
-- **Database throughput**: 500+ records/second bulk operations
-- **Memory usage**: 4-8GB with LLM loaded
+Reproducible on any machine:
 
-## Installation
+- **Bulk database throughput** — ~1,300 deduplicating upserts/second against SQLite on a
+  laptop. Reproduce with `python scripts/benchmark_bulk_db.py 5000`.
+- **Test suite** — 146 deterministic tests, ~64% line coverage, run in ~1.5s without the
+  model (`pytest`).
 
-**Requirements:**
-- Python 3.8+
-- 8GB+ RAM (for local LLM)
-- ~4GB disk space (model download)
+From a development run against the Palo Alto Chamber directory (2025): ~296 businesses
+across 26 categories in ~9 minutes, with high completeness on names and phone numbers and
+lower completeness on emails and websites. These figures come from a single real run and
+will vary by site, layout, and model build — treat them as illustrative, not a benchmark.
 
-**Setup:**
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python cli.py init
-```
-
-The setup script downloads Qwen2-7B (~4GB) automatically.
-
-## Usage Examples
-
-**Single chamber:**
-```bash
-python cli.py chambers --url https://business.yourchamber.com
-```
-
-**Multiple chambers:**
-```csv
-# chambers.csv
-url
-https://business.chamber1.com
-https://business.chamber2.com
-```
-
-```bash
-python cli.py chambers --input chambers.csv
-```
-
-**View results:**
-```bash
-python cli.py stats    # Extraction statistics
-python cli.py export   # Export to CSV
-```
-
-## How It Works
-
-1. **LLM Analysis**: Qwen2-7B analyzes chamber page structure and identifies directory sections
-2. **Pattern Recognition**: Handles different layouts (categories, alphabetical, pagination) automatically  
-3. **Data Extraction**: Extracts structured business information with validation
-4. **Deduplication**: Removes duplicates based on website/name combinations
-
-## Architecture
+## How it works
 
 ```
-Chamber URL → LLM Navigation → Data Extraction → Validation → SQLite Database
-     ↓              ↓              ↓           ↓           ↓
-HTML Content   Directory Links   Business Data  Clean Data  Exportable CSV
+chamber URL
+   │  AsyncWebCrawler  (robots.txt, rate limiting, retries, Playwright for JS pages)
+   ▼
+HTML ──► LLMProcessor ──► find directory links ──► extract listings (JSON, repaired)
+   │        (Qwen2-7B via pluggable LLMBackend)              │
+   │                                                         ▼
+   └────────────► HTMLScraper (chamber metadata)      deduplicate
+                                                             │
+                                                             ▼
+                                            BulkDatabaseProcessor ──► SQLite ──► CSV
 ```
 
-**Core modules:**
-- `llm_processor.py` - Qwen2-7B integration for page analysis
-- `chamber_parser.py` - Directory navigation and pagination  
-- `crawler.py` - Web scraping with rate limiting, browser automation
-- `bulk_database.py` - Efficient database operations
+Core modules:
 
-## Database Schema
+- `crawler.py` — async fetching, robots.txt, per-domain rate limiting, retries, CAPTCHA
+  detection; HTTPX by default, Playwright/Chromium for JavaScript-rendered pages.
+- `scraper.py` — deterministic single-page extraction; generic/placeholder noise is
+  filtered via `generic_filters.py`.
+- `llm_processor.py` — HTML→Markdown preprocessing, prompting, grammar-constrained JSON,
+  and JSON-repair; reached through the `LLMBackend` protocol.
+- `chamber_parser.py` / `chamber_pipeline.py` — directory discovery, pagination, dedup,
+  and orchestration.
+- `bulk_database.py` / `database.py` / `models.py` — typed SQLAlchemy 2.0 persistence.
 
-```sql
-CREATE TABLE leads (
-    id INTEGER PRIMARY KEY,
-    company_name VARCHAR,
-    website VARCHAR,
-    phone_numbers JSON,    -- ["555-1234", "555-5678"]
-    emails JSON,           -- ["info@company.com"]
-    addresses JSON,        -- ["123 Main St, City, State"]
-    industry_tags JSON,    -- ["Technology", "Consulting"]
-    chamber_name VARCHAR,
-    chamber_url VARCHAR,
-    created_at TIMESTAMP
-);
-```
+## Responsible use
+
+This tool reads **public** directory pages. It is built to be a polite, defensible
+citizen, and you should keep it that way:
+
+- **robots.txt is honored by default** (`CRAWLER__RESPECT_ROBOTS_TXT=true`). Disabling it
+  is your responsibility.
+- **Rate limiting** enforces a minimum delay per domain; keep concurrency modest.
+- Respect each site's Terms of Service and applicable law. Don't collect personal data
+  you don't have a lawful basis to process, and don't republish scraped data in ways the
+  source prohibits.
+- Identify yourself when a site asks: set a contact User-Agent via `CRAWLER__...` and
+  reach out to operators if you intend sustained crawling.
+
+Intended use is lawful B2B research and lead generation against directories that permit
+it. It is not intended for bulk personal-data harvesting or for evading access controls.
 
 ## Configuration
 
-Key settings in `.env`:
+Settings load from environment variables (and an optional `.env`), overriding the
+built-in defaults. Nested groups use a `__` delimiter. See `.env.example`; common keys:
+
 ```bash
-DATABASE_URL="sqlite+aiosqlite:///./data/leads.db"
-MAX_CONCURRENCY=5
-CRAWLER_TIMEOUT_SECONDS=30
-LLM_MODEL_PATH="./models/qwen2-7b-instruct-q4_k_m.gguf"
+DATABASE__DATABASE_URL="sqlite+aiosqlite:///./data/leads.db"
+CRAWLER__RESPECT_ROBOTS_TXT=true
+CRAWLER__MIN_DELAY_PER_DOMAIN_SECONDS=3.0
+CRAWLER__USE_PLAYWRIGHT_BY_DEFAULT=false
+LLM__MODEL_PATH="./models/qwen2-7b-instruct-q4_k_m.gguf"
+LLM__CONTEXT_SIZE=32768
 ```
 
-## Troubleshooting
+`lead-gen config` prints the active configuration.
 
-**"llama-cpp-python not available"**
+## Development
+
 ```bash
-pip uninstall llama-cpp-python
-# For Apple Silicon:
-CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python --no-cache-dir
-# For Intel/AMD:
-CMAKE_ARGS="-DLLAMA_BLAS=ON" pip install llama-cpp-python --no-cache-dir
+pip install -e ".[dev]"
+black --check . && ruff check . && mypy lead_gen_pipeline && pytest
 ```
 
-**Model download fails:**
+The default test run excludes the model. The live-model check is marked and opt-in:
+
 ```bash
-python cli.py setup-llm
+pytest -m live_llm           # requires the downloaded GGUF model
+python scripts/smoke_llm.py  # one-off manual check
 ```
 
-**Low extraction rates:**
-Some chambers use heavy JavaScript. System falls back to traditional scraping automatically.
+Optional extras: `llm` (llama-cpp-python + huggingface-hub), `browser` (Playwright),
+`nlp` (spaCy NER fallback for company names), `dev` (toolchain).
 
-## Extending the System
+## Limits
 
-The LLM processor can adapt to other directory types:
-- Industry association member lists
-- Professional organization directories  
-- Business listing websites
-- Government contractor databases
-
-For custom adaptations or consulting on B2B data extraction projects, contact me at [databurton.com](https://databurton.com).
-
-## Contributing
-
-Pull requests welcome. The prompt engineering can always be refined - LLMs occasionally miss businesses or extract incomplete data.
-
-**Development setup:**
-```bash
-git clone https://github.com/Burton-David/lead-gen-pipeline
-cd lead-gen-pipeline
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt -r requirements-dev.txt
-```
+- Extraction quality on the LLM path depends on the model build and the site; very
+  JavaScript-heavy or aggressively bot-protected directories may extract poorly.
+- The default store is SQLite, which is plenty for single-machine runs; swap
+  `DATABASE__DATABASE_URL` for Postgres for larger deployments.
+- spaCy-based company-name extraction is an optional fallback and off by default.
 
 ## License
 
-MIT License - see LICENSE file.
-
----
-
-**Built for B2B lead generation and business intelligence applications.**
-
-*For custom business directory extraction or B2B data projects, reach out via [databurton.com](https://databurton.com)*
+MIT — see [LICENSE](LICENSE).

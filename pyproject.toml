@@ -1,0 +1,122 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lead-gen-pipeline"
+version = "1.0.0"
+description = "Local-LLM business-directory scraper with agentic navigation, structured extraction, and JSON-repair fallbacks."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "David Burton", email = "david@databurton.com" }]
+keywords = ["scraping", "local-llm", "data-extraction", "lead-generation", "qwen2", "llama-cpp"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+    "Topic :: Text Processing :: Markup :: HTML",
+]
+
+# Core runtime: everything needed for the single-site extraction path and the
+# deterministic test gate. The local-LLM runtime and the headless browser are
+# optional extras so a default install stays light.
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "python-dotenv>=1.0",
+    "loguru>=0.7",
+    "SQLAlchemy>=2.0",
+    "greenlet>=3.0",
+    "aiosqlite>=0.20",
+    "typer>=0.12",
+    "rich>=13.7",
+    "tldextract>=5.1",
+    "phonenumbers>=8.13",
+    "email-validator>=2.1",
+    "json-repair>=0.25",
+    "markdownify>=0.12",
+]
+
+[project.optional-dependencies]
+# Local LLM runtime (Qwen2-7B via llama.cpp) + model download helper.
+llm = [
+    "llama-cpp-python>=0.2.79",
+    "huggingface-hub>=0.23",
+]
+# Headless browser for JavaScript-rendered directory pages.
+browser = ["playwright>=1.44"]
+# spaCy NER fallback for company-name extraction.
+nlp = ["spacy>=3.7"]
+# Lint / type / test toolchain. black is pinned for cross-version stability.
+dev = [
+    "black==25.1.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "pytest-mock>=3.14",
+    "pytest-cov>=5.0",
+    "respx>=0.21",
+]
+
+[project.urls]
+Homepage = "https://github.com/Burton-David/lead-gen-pipeline"
+Repository = "https://github.com/Burton-David/lead-gen-pipeline"
+
+[project.scripts]
+lead-gen = "lead_gen_pipeline.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lead_gen_pipeline"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "N"]
+# Pydantic-settings fields and SQLAlchemy columns are intentionally UPPER_CASE /
+# class-level; the test suite uses module-style fixtures that trip a few checks.
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["N802", "N806", "E501"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["lead_gen_pipeline"]
+ignore_missing_imports = true
+warn_redundant_casts = true
+# Optional-dependency import guards (playwright, llama_cpp, ...) make some
+# `type: ignore`s conditionally unused, so this check is intentionally off.
+warn_unused_ignores = false
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_incomplete_defs = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-m 'not live_llm'"
+markers = [
+    "live_llm: requires a downloaded Qwen2-7B GGUF model and is excluded from the default run",
+]
+
+[tool.coverage.run]
+source = ["lead_gen_pipeline"]
+branch = true
