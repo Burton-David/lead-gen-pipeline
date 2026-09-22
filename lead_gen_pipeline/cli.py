@@ -363,6 +363,7 @@ def config() -> None:
     table.add_row("Log level", settings.logging.LOG_LEVEL)
     table.add_row("Default timeout", f"{settings.crawler.DEFAULT_TIMEOUT_SECONDS}s")
     table.add_row("Respect robots.txt", str(settings.crawler.RESPECT_ROBOTS_TXT))
+    table.add_row("User-Agent", settings.crawler.USER_AGENT)
     table.add_row("Use Playwright", str(settings.crawler.USE_PLAYWRIGHT_BY_DEFAULT))
     table.add_row("LLM model path", str(settings.llm.MODEL_PATH))
     table.add_row("LLM context size", str(settings.llm.CONTEXT_SIZE))

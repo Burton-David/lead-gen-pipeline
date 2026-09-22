@@ -117,19 +117,9 @@ class AsyncWebCrawler:
             f"Crawler ready. robots.txt respect: {self.settings.RESPECT_ROBOTS_TXT}"
         )
 
-    def _get_random_user_agent(self) -> str:
-        """Select a random User-Agent string from the configured list."""
-        if self.settings.USER_AGENTS:
-            return random.choice(self.settings.USER_AGENTS)
-        return (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        )
-
     def _construct_headers(self, url: str) -> dict[str, str]:
-        """Construct request headers that resemble a real browser navigation."""
         return {
-            "User-Agent": self._get_random_user_agent(),
+            "User-Agent": self.settings.USER_AGENT,
             "Accept": (
                 "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
                 "image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
@@ -143,7 +133,6 @@ class AsyncWebCrawler:
             "Sec-Fetch-Site": "none",
             "Sec-Fetch-User": "?1",
             "DNT": "1",
-            "Referer": "https://www.google.com/",
         }
 
     async def _fetch_and_parse_robots_txt(
@@ -156,7 +145,7 @@ class AsyncWebCrawler:
 
         robots_content: str | None = None
         final_robots_url_fetched: str | None = None
-        robots_fetch_headers = {"User-Agent": self.settings.ROBOTS_TXT_USER_AGENT}
+        robots_fetch_headers = {"User-Agent": self.settings.USER_AGENT}
 
         async with httpx.AsyncClient(
             timeout=self.settings.ROBOTS_TXT_FETCH_TIMEOUT_SECONDS,
@@ -252,7 +241,7 @@ class AsyncWebCrawler:
             )
             return
 
-        user_agent = self.settings.ROBOTS_TXT_USER_AGENT
+        user_agent = self.settings.USER_AGENT
         parser = await self._get_robots_parser(domain)
 
         if parser is None:
@@ -301,7 +290,6 @@ class AsyncWebCrawler:
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
                     "--disable-infobars",
                     "--disable-popup-blocking",
                     "--disable-notifications",
@@ -342,13 +330,10 @@ class AsyncWebCrawler:
         viewport_height = random.randint(720, 1080)
 
         context = await browser.new_context(
-            user_agent=self._get_random_user_agent(),
+            user_agent=self.settings.USER_AGENT,
             viewport={"width": viewport_width, "height": viewport_height},
             java_script_enabled=True,
             bypass_csp=True,
-        )
-        await context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         page = await context.new_page()
         self.logger.debug(
@@ -458,8 +443,8 @@ class AsyncWebCrawler:
             return response.text, status_code, final_url
 
     @async_retry(
-        # Retry transient fetch failures only. A robots.txt disallow is terminal — it
-        # will not change on retry — so it is excluded and surfaces immediately.
+        # Retry transient fetch failures only. A robots.txt disallow will not change
+        # on retry, so it is excluded and surfaces immediately.
         exceptions=(
             httpx.HTTPStatusError,
             httpx.TimeoutException,

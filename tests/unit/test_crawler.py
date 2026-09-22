@@ -232,7 +232,7 @@ async def test_robots_parser_is_cached(crawler, monkeypatch):
 @pytest.mark.asyncio
 async def test_check_robots_disallowed_raises(crawler, monkeypatch):
     url = "http://block.com/secret"
-    ua = crawler.settings.ROBOTS_TXT_USER_AGENT
+    ua = crawler.settings.USER_AGENT
     parser = MagicMock(spec=urllib.robotparser.RobotFileParser)
     parser.can_fetch.return_value = False
     monkeypatch.setattr(crawler, "_get_robots_parser", AsyncMock(return_value=parser))
@@ -246,7 +246,7 @@ async def test_check_robots_disallowed_raises(crawler, monkeypatch):
 @pytest.mark.asyncio
 async def test_fetch_page_blocks_disallowed(crawler, monkeypatch):
     monkeypatch.setattr(crawler.settings, "RESPECT_ROBOTS_TXT", True)
-    monkeypatch.setattr(crawler.settings, "ROBOTS_TXT_USER_AGENT", "TestBot")
+    monkeypatch.setattr(crawler.settings, "USER_AGENT", "TestBot/2.0")
     respx.get("https://r.com/robots.txt").mock(
         return_value=httpx.Response(200, text="User-agent: TestBot\nDisallow: /no.html")
     )
@@ -258,6 +258,63 @@ async def test_fetch_page_blocks_disallowed(crawler, monkeypatch):
     assert html is None
     assert status == 403
     assert blocked.call_count == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_robots_group_for_our_agent_wins_over_wildcard(crawler, monkeypatch):
+    # The wildcard group allows everything; only the group naming this crawler
+    # blocks /members/. Checking robots.txt as "*" would miss that.
+    monkeypatch.setattr(crawler.settings, "RESPECT_ROBOTS_TXT", True)
+    respx.get("https://examplechamber.com/robots.txt").mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                "User-agent: *\nDisallow:\n\n"
+                "User-agent: lead-gen-pipeline\nDisallow: /members/\n"
+            ),
+        )
+    )
+    members = respx.get("https://examplechamber.com/members/list")
+    html, status, _ = await crawler.fetch_page(
+        "https://examplechamber.com/members/list", use_playwright=False
+    )
+    assert (html, status) == (None, 403)
+    assert members.call_count == 0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_configured_user_agent_sent_to_page_and_robots(crawler, monkeypatch):
+    ua = "lead-gen-pipeline/1.0.0 (+https://github.com/x/y; ops@example.com)"
+    monkeypatch.setattr(crawler.settings, "RESPECT_ROBOTS_TXT", True)
+    monkeypatch.setattr(crawler.settings, "USER_AGENT", ua)
+    robots = respx.get("https://ua-test.com/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nDisallow:")
+    )
+    page = respx.get("https://ua-test.com/").mock(
+        return_value=httpx.Response(200, html="<html>ok</html>")
+    )
+    await crawler.fetch_page("https://ua-test.com/", use_playwright=False)
+    assert robots.calls.last.request.headers["User-Agent"] == ua
+    assert page.calls.last.request.headers["User-Agent"] == ua
+    assert "Referer" not in page.calls.last.request.headers
+
+
+@pytest.mark.asyncio
+async def test_playwright_context_uses_configured_user_agent(crawler, monkeypatch):
+    monkeypatch.setattr(crawler.settings, "USER_AGENT", "lead-gen-pipeline/9.9")
+    context = AsyncMock()
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    monkeypatch.setattr(
+        AsyncWebCrawler, "_ensure_playwright_browser", AsyncMock(return_value=browser)
+    )
+    await crawler._get_playwright_page()
+    assert browser.new_context.await_args.kwargs["user_agent"] == (
+        "lead-gen-pipeline/9.9"
+    )
+    context.add_init_script.assert_not_awaited()
 
 
 # misc

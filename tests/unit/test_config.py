@@ -22,7 +22,10 @@ def test_default_settings_load_correctly():
 
     assert settings.crawler.DEFAULT_TIMEOUT_SECONDS == 30
     assert settings.crawler.RESPECT_ROBOTS_TXT is True
-    assert settings.crawler.ROBOTS_TXT_USER_AGENT == "*"
+    assert settings.crawler.USER_AGENT.startswith("lead-gen-pipeline/")
+    assert "https://github.com/Burton-David/lead-gen-pipeline" in (
+        settings.crawler.USER_AGENT
+    )
 
     assert settings.database.DATABASE_URL.startswith("sqlite+aiosqlite:///")
     assert settings.database.ECHO_SQL is False
@@ -64,6 +67,17 @@ def test_dotenv_file_override(tmp_path):
     assert settings.PROJECT_NAME == "From DotEnv"
     assert settings.crawler.MAX_RETRIES == 7
     assert settings.INPUT_URLS_CSV.resolve() == csv_file.resolve()
+
+
+def test_user_agent_override_from_env(monkeypatch):
+    ua = "lead-gen-pipeline/1.0.0 (+https://github.com/x/y; ops@example.com)"
+    monkeypatch.setenv("CRAWLER__USER_AGENT", ua)
+    assert AppSettings(_env_file=None).crawler.USER_AGENT == ua
+
+
+def test_empty_user_agent_rejected():
+    with pytest.raises(ValueError):
+        CrawlerSettings(USER_AGENT="")
 
 
 def test_crawler_delay_validation():
